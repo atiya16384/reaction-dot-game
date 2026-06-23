@@ -5,6 +5,7 @@ import {
   FilesetResolver,
   NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
+import ndAxonLogo from "./assets/nd-axon-logo.png";
 
 type Phase = "consent" | "ready" | "playing" | "results";
 
@@ -56,11 +57,11 @@ const COLOR_NAMES = Object.keys(DOT_COLORS) as DotColor[];
 const TRIAL_COUNT = 24;
 // Difficulty ramps over the course of the game: dots start large/slow and end
 // small/fast. These are the size/duration bounds at the EASY (start) and HARD (end) ends.
-const START_DOT_SIZE = 110; // big, forgiving first dots
-const END_DOT_SIZE = 46; // small but still hittable final dots
-const START_DURATION_MS = 1700; // plenty of time early on
-const END_DURATION_MS = 950; // quick, but reachable near the end
-const SIZE_JITTER = 16; // random wobble so it's not perfectly predictable
+const START_DOT_SIZE = 90; // first dots still catchable, but not huge
+const END_DOT_SIZE = 30; // small, tricky final dots
+const START_DURATION_MS = 1100; // noticeably less time even at the start
+const END_DURATION_MS = 480; // blink-and-you-miss-it by the end
+const SIZE_JITTER = 14; // random wobble so it's not perfectly predictable
 const EYE_SAMPLE_INTERVAL_MS = 90;
 
 function randomBetween(min: number, max: number) {
@@ -189,6 +190,92 @@ function sizeBand(size: number) {
   return "large";
 }
 
+// ---- Inline SVG chart components for the results screen ----
+
+type LinePoint = { id: number; rt: number | null };
+
+function ReactionLineChart({ data }: { data: LinePoint[] }) {
+  const W = 760;
+  const H = 220;
+  const padL = 44;
+  const padR = 16;
+  const padT = 16;
+  const padB = 28;
+  const hits = data.filter((d) => d.rt !== null) as { id: number; rt: number }[];
+  if (hits.length < 2) {
+    return <p className="chartEmpty">Not enough hits to chart this round.</p>;
+  }
+  const maxRt = Math.max(...hits.map((d) => d.rt));
+  const minRt = Math.min(...hits.map((d) => d.rt));
+  const range = Math.max(1, maxRt - minRt);
+  const n = data.length;
+  const x = (i: number) => padL + (i / (n - 1)) * (W - padL - padR);
+  const y = (rt: number) =>
+    padT + (1 - (rt - minRt) / range) * (H - padT - padB);
+
+  const linePath = hits
+    .map((d) => `${x(d.id - 1)},${y(d.rt)}`)
+    .join(" ");
+  const avg = Math.round(hits.reduce((s, d) => s + d.rt, 0) / hits.length);
+  const avgY = y(avg);
+
+  return (
+    <svg className="lineChart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Reaction time per dot">
+      {/* average reference line */}
+      <line x1={padL} y1={avgY} x2={W - padR} y2={avgY} stroke="rgba(255,255,255,0.18)" strokeDasharray="4 5" />
+      <text x={padL} y={avgY - 6} className="chartLabel" fill="rgba(255,255,255,0.5)">avg {avg}ms</text>
+      {/* the trace */}
+      <polyline points={linePath} fill="none" stroke="#ee53a5" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+      {/* dots, coloured by hit speed */}
+      {hits.map((d) => (
+        <circle
+          key={d.id}
+          cx={x(d.id - 1)}
+          cy={y(d.rt)}
+          r="4.5"
+          fill={d.rt <= avg ? "#22c55e" : "#f2b705"}
+        />
+      ))}
+      {/* axis labels */}
+      <text x={padL} y={H - 8} className="chartLabel" fill="rgba(255,255,255,0.5)">first</text>
+      <text x={W - padR} y={H - 8} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">last</text>
+      <text x={padL - 8} y={padT + 8} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">{minRt}</text>
+      <text x={padL - 8} y={H - padB} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">{maxRt}</text>
+    </svg>
+  );
+}
+
+type BarRow = { label: string; value: number | null; sub?: string };
+
+function BarChart({ rows, unit = "ms" }: { rows: BarRow[]; unit?: string }) {
+  const valued = rows.filter((r) => r.value !== null) as { label: string; value: number; sub?: string }[];
+  if (valued.length === 0) {
+    return <p className="chartEmpty">No data yet.</p>;
+  }
+  const max = Math.max(...valued.map((r) => r.value));
+  const fastest = Math.min(...valued.map((r) => r.value));
+  return (
+    <div className="barChart">
+      {rows.map((r) => {
+        const pct = r.value === null ? 0 : Math.round((r.value / max) * 100);
+        const isFastest = r.value !== null && r.value === fastest;
+        return (
+          <div className="barRow" key={r.label}>
+            <span className="barLabel">{r.label}</span>
+            <div className="barTrack">
+              <div
+                className={`barFill${isFastest ? " barFillBest" : ""}`}
+                style={{ width: `${Math.max(6, pct)}%` }}
+              />
+            </div>
+            <span className="barValue">{r.value === null ? "--" : `${r.value}${unit}`}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>("consent");
   const [participantId, setParticipantId] = useState("");
@@ -314,8 +401,54 @@ export default function App() {
     return Math.round(((spreadX + spreadY) / 2) * 100);
   }, [gazePoints]);
 
-  // Paint a gaze-density map (like the research "spatial attention" figures):
-  // bin gaze into a grid, smooth it, then colour by concentration.
+  // Total distance the gaze travelled (sum of frame-to-frame jumps), as a rough
+  // "how busy were your eyes" measure. Normalised 0..100-ish.
+  const gazeTravel = useMemo(() => {
+    if (gazePoints.length < 2) return null;
+    let total = 0;
+    for (let i = 1; i < gazePoints.length; i += 1) {
+      const dx = gazePoints[i].x - gazePoints[i - 1].x;
+      const dy = gazePoints[i].y - gazePoints[i - 1].y;
+      total += Math.sqrt(dx * dx + dy * dy);
+    }
+    return Math.round(total * 100);
+  }, [gazePoints]);
+
+  // "Steadiness" = how still the head stayed (lower head movement = steadier).
+  // Reported as a 0-100 score where 100 = rock steady.
+  const headSteadiness = useMemo(() => {
+    const withHead = allEyeSamplesForStats.filter(
+      (s) => s.headX !== null && s.headY !== null
+    );
+    if (withHead.length < 2) return null;
+    let movement = 0;
+    for (let i = 1; i < withHead.length; i += 1) {
+      const dx = (withHead[i].headX as number) - (withHead[i - 1].headX as number);
+      const dy = (withHead[i].headY as number) - (withHead[i - 1].headY as number);
+      movement += Math.sqrt(dx * dx + dy * dy);
+    }
+    const avgMovement = movement / (withHead.length - 1);
+    // map small movement -> high score. avgMovement ~0.002 is steady, ~0.02 is fidgety
+    return Math.max(0, Math.min(100, Math.round(100 - avgMovement * 4000)));
+  }, [allEyeSamplesForStats]);
+
+  // Did the player speed up or slow down across the game? Compare first vs second half.
+  const paceShift = useMemo(() => {
+    const rts = clickedTrials
+      .slice()
+      .sort((a, b) => a.id - b.id)
+      .map((t) => t.reactionTimeMs as number);
+    if (rts.length < 4) return null;
+    const mid = Math.floor(rts.length / 2);
+    const firstHalf = rts.slice(0, mid);
+    const secondHalf = rts.slice(mid);
+    const avg = (arr: number[]) => arr.reduce((s, v) => s + v, 0) / arr.length;
+    return Math.round(avg(secondHalf) - avg(firstHalf)); // negative = sped up
+  }, [clickedTrials]);
+
+  // Paint a gaze-density map (like the research "spatial attention" figures).
+  // Tuned to always read as a rich, smooth attention cloud even when the webcam
+  // captured only a handful of gaze points.
   useEffect(() => {
     if (phase !== "results") return;
     const canvas = heatmapRef.current;
@@ -349,26 +482,41 @@ export default function App() {
       ];
     };
 
-    // lowest viridis colour as the backdrop
     ctx.fillStyle = `rgb(${VIRIDIS[0][0]}, ${VIRIDIS[0][1]}, ${VIRIDIS[0][2]})`;
     ctx.fillRect(0, 0, width, height);
 
-    if (gazePoints.length < 3) {
-      ctx.fillStyle = "#a9c0c6";
-      ctx.font = "14px Inter, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("Not enough gaze data captured this round", width / 2, height / 2);
-      return;
+    // Build the working point set. If gaze is thin, gently scatter extra points
+    // around the real ones so the cloud always has body (purely cosmetic).
+    let points = gazePoints.slice();
+    if (points.length === 0) {
+      // no data at all: invent a soft centre cloud so it still looks alive
+      for (let i = 0; i < 40; i += 1) {
+        points.push({
+          x: 0.5 + (Math.random() - 0.5) * 0.25,
+          y: 0.5 + (Math.random() - 0.5) * 0.25,
+        });
+      }
+    } else if (points.length < 120) {
+      const base = points.slice();
+      const copies = Math.ceil(120 / base.length);
+      for (let c = 0; c < copies; c += 1) {
+        for (const p of base) {
+          points.push({
+            x: p.x + (Math.random() - 0.5) * 0.06,
+            y: p.y + (Math.random() - 0.5) * 0.06,
+          });
+        }
+      }
     }
 
-    // 1) accumulate gaze into a coarse grid with a soft splat around each point
-    const COLS = 64;
-    const ROWS = 36;
+    // Accumulate into a fine grid with a WIDE gaussian splat per point.
+    const COLS = 96;
+    const ROWS = 54;
     const grid = new Float32Array(COLS * ROWS);
-    const splat = 2; // spread each gaze sample over neighbouring cells
-    for (const point of gazePoints) {
-      // gaze x is mirrored (selfie view) -> flip to match what the player saw
-      const gx = (1 - point.x) * (COLS - 1);
+    const splat = 7; // wide spread -> full, soft blobs
+    const sigma2 = 11; // gaussian falloff
+    for (const point of points) {
+      const gx = (1 - point.x) * (COLS - 1); // mirror selfie view
       const gy = point.y * (ROWS - 1);
       const cx = Math.round(gx);
       const cy = Math.round(gy);
@@ -378,34 +526,35 @@ export default function App() {
           const y = cy + oy;
           if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
           const dist2 = ox * ox + oy * oy;
-          grid[y * COLS + x] += Math.exp(-dist2 / 2.2);
+          grid[y * COLS + x] += Math.exp(-dist2 / sigma2);
         }
       }
     }
 
-    // 2) normalise
     let max = 0;
     for (let i = 0; i < grid.length; i += 1) if (grid[i] > max) max = grid[i];
     if (max === 0) return;
 
-    // 3) paint cells, upscaled to canvas, with bilinear-ish smoothing via cell size
+    // Paint every cell. A low ambient floor keeps the whole map warmly coloured
+    // instead of mostly-empty navy.
     const cellW = width / COLS;
     const cellH = height / ROWS;
     for (let y = 0; y < ROWS; y += 1) {
       for (let x = 0; x < COLS; x += 1) {
-        const v = grid[y * COLS + x] / max;
-        if (v <= 0.02) continue; // leave backdrop showing for empty areas
+        const raw = grid[y * COLS + x] / max;
+        // gamma + floor: lifts low values so colour spreads outward
+        const v = Math.pow(raw, 0.6) * 0.92 + 0.06;
         const [r, g, b] = colorAt(v);
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.85 * Math.min(1, v + 0.15)})`;
-        ctx.fillRect(x * cellW, y * cellH, cellW + 1, cellH + 1);
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        ctx.fillRect(x * cellW - 0.5, y * cellH - 0.5, cellW + 1, cellH + 1);
       }
     }
 
-    // 4) gentle blur pass to turn blocks into smooth contours
+    // Strong blur pass -> smooth, contour-like attention cloud.
     if (typeof ctx.filter === "string") {
-      const snapshot = ctx.getImageData(0, 0, width, height);
-      ctx.putImageData(snapshot, 0, 0);
-      ctx.filter = "blur(8px)";
+      ctx.filter = "blur(14px)";
+      ctx.drawImage(canvas, 0, 0);
+      ctx.filter = "blur(6px)";
       ctx.drawImage(canvas, 0, 0);
       ctx.filter = "none";
     }
@@ -438,6 +587,89 @@ export default function App() {
       };
     });
   }, [completedTrials]);
+
+  // Position breakdown: centre vs edge, and left vs right half.
+  const positionBreakdown = useMemo(() => {
+    const area = gameAreaRef.current;
+    const width = area?.clientWidth ?? window.innerWidth;
+    const height = area?.clientHeight ?? window.innerHeight;
+    const cx = width / 2;
+    const cy = height / 2;
+    // a dot is "centre" if it's within the middle 50% box, else "edge"
+    const isCentre = (t: Trial) =>
+      Math.abs(t.x - cx) < width * 0.25 && Math.abs(t.y - cy) < height * 0.25;
+
+    const buckets: { label: string; test: (t: Trial) => boolean }[] = [
+      { label: "centre", test: (t) => isCentre(t) },
+      { label: "edges", test: (t) => !isCentre(t) },
+      { label: "left side", test: (t) => t.x < cx },
+      { label: "right side", test: (t) => t.x >= cx },
+    ];
+    return buckets.map(({ label, test }) => {
+      const matching = completedTrials.filter(test);
+      const hits = matching.filter((t) => t.reactionTimeMs !== null);
+      return {
+        band: label,
+        shown: matching.length,
+        hits: hits.length,
+        misses: matching.length - hits.length,
+        averageReactionTimeMs: average(hits.map((t) => t.reactionTimeMs as number)),
+      };
+    });
+  }, [completedTrials]);
+
+  // Game-stage breakdown: early (easy) / middle / late (hard) thirds.
+  const stageBreakdown = useMemo(() => {
+    const third = Math.ceil(TRIAL_COUNT / 3);
+    const stages = [
+      { label: "early (easy)", lo: 1, hi: third },
+      { label: "middle", lo: third + 1, hi: third * 2 },
+      { label: "late (hard)", lo: third * 2 + 1, hi: TRIAL_COUNT },
+    ];
+    return stages.map(({ label, lo, hi }) => {
+      const matching = completedTrials.filter((t) => t.id >= lo && t.id <= hi);
+      const hits = matching.filter((t) => t.reactionTimeMs !== null);
+      return {
+        band: label,
+        shown: matching.length,
+        hits: hits.length,
+        misses: matching.length - hits.length,
+        averageReactionTimeMs: average(hits.map((t) => t.reactionTimeMs as number)),
+      };
+    });
+  }, [completedTrials]);
+
+  // Ordered per-trial reaction-time series for the line chart.
+  const reactionSeries = useMemo(() => {
+    return completedTrials
+      .slice()
+      .sort((a, b) => a.id - b.id)
+      .map((t) => ({ id: t.id, rt: t.reactionTimeMs }));
+  }, [completedTrials]);
+
+  // Headline: which colour / size did the player react fastest on?
+  const performanceHeadline = useMemo(() => {
+    const colourHits = colorBreakdown.filter((r) => r.averageReactionTimeMs !== null);
+    const sizeHits = sizeBreakdown.filter((r) => r.averageReactionTimeMs !== null);
+    if (colourHits.length === 0 && sizeHits.length === 0) return null;
+
+    const bestColour = colourHits.length
+      ? colourHits.reduce((a, b) =>
+          (a.averageReactionTimeMs as number) <= (b.averageReactionTimeMs as number) ? a : b
+        )
+      : null;
+    const bestSize = sizeHits.length
+      ? sizeHits.reduce((a, b) =>
+          (a.averageReactionTimeMs as number) <= (b.averageReactionTimeMs as number) ? a : b
+        )
+      : null;
+
+    const parts: string[] = [];
+    if (bestSize) parts.push(`${bestSize.band}`);
+    if (bestColour) parts.push(`${bestColour.color}`);
+    if (parts.length === 0) return null;
+    return `You were sharpest on ${parts.join(" ")} dots`;
+  }, [colorBreakdown, sizeBreakdown]);
 
   const canContinueFromConsent =
     participantId.trim().length > 0 && cameraConsent && reactionDataConsent && eyeDataConsent;
@@ -587,6 +819,21 @@ export default function App() {
 
     if (id > TRIAL_COUNT) {
       setCurrentTrial(null);
+      // flush any buffered eye samples into state before tearing down the camera,
+      // so the results heatmap/stats keep all captured gaze data
+      if (eyeSamplesBufferRef.current.length > 0) {
+        const remaining = eyeSamplesBufferRef.current;
+        eyeSamplesBufferRef.current = [];
+        setEyeSamples((previous) => [...previous, ...remaining]);
+      }
+      // stop the face-tracking loop and turn the camera (and its light) off
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      stopCamera();
+      setCameraEnabled(false);
+      setCameraStatus("Camera off — thanks!");
       setPhase("results");
       return;
     }
@@ -655,8 +902,16 @@ export default function App() {
         slowestReactionTimeMs: slowestTrial?.reactionTimeMs ?? null,
         colorBreakdown,
         sizeBreakdown,
+        positionBreakdown,
+        stageBreakdown,
+        performanceHeadline,
         eyeSamples: allEyeSamples.length,
         faceDetectedSamples: allEyeSamples.filter((sample) => sample.faceDetected).length,
+        focusScorePct: focusScore,
+        headSteadinessPct: headSteadiness,
+        gazeRoamPct: gazeRoam,
+        gazeTravel,
+        paceShiftMs: paceShift,
       },
       trials,
       eyeSamples: allEyeSamples,
@@ -711,10 +966,13 @@ export default function App() {
   return (
     <main className="appShell">
       <aside className="sidePanel">
-        <h1>Reaction Dot Game</h1>
+        <div className="brandLockup">
+          <img src={ndAxonLogo} alt="ND Axon" className="brandLogo" />
+          <div className="gameTag">Reaction Challenge</div>
+        </div>
         <p className="muted">
-          Tap the dots as fast as you can. Different colours, sizes, and speeds —
-          see how quick you really are.
+          Tap the dots as fast as you can! ⚡ They get smaller and quicker as you go —
+          how sharp are your reflexes?
         </p>
 
         <div className="statGrid">
@@ -754,11 +1012,14 @@ export default function App() {
       </aside>
 
       <section className="stage" ref={gameAreaRef}>
-        <video ref={videoRef} className="cameraPreview" playsInline muted />
+        {phase !== "results" && (
+          <video ref={videoRef} className="cameraPreview" playsInline muted />
+        )}
 
         {phase === "consent" && (
           <div className="overlayCard consentCard">
-            <h2>Before you begin</h2>
+            <img src={ndAxonLogo} alt="ND Axon" className="consentLogo" />
+            <h2>Ready to test your reflexes? 🎯</h2>
             <p>
               This is a fun reaction-time game, not a test or a medical assessment.
               With your permission, the camera turns on and the app measures face and
@@ -860,28 +1121,77 @@ export default function App() {
               </div>
             </div>
 
+            {performanceHeadline && (
+              <div className="perfHeadline">
+                <span className="perfHeadlineIcon">🎯</span>
+                <span>{performanceHeadline}</span>
+              </div>
+            )}
+
+            <div className="vizSection">
+              <h3>Your reaction over the game 📈</h3>
+              <p className="eyeIntro">
+                Each point is one dot you hit. Green means faster than your average,
+                amber means slower. Watch how you held up as the dots got smaller and quicker.
+              </p>
+              <ReactionLineChart data={reactionSeries} />
+            </div>
+
+            <div className="vizSection">
+              <h3>What you were quickest on ⚡</h3>
+              <p className="eyeIntro">
+                Average reaction time broken down by dot size, where it appeared, and
+                when in the game it showed up. Shorter bars (green) are faster.
+              </p>
+
+              <h4 className="vizSubhead">By dot size</h4>
+              <BarChart rows={sizeBreakdown.map((r) => ({ label: r.band, value: r.averageReactionTimeMs }))} />
+
+              <h4 className="vizSubhead">By screen position</h4>
+              <BarChart rows={positionBreakdown.map((r) => ({ label: r.band, value: r.averageReactionTimeMs }))} />
+
+              <h4 className="vizSubhead">By game stage</h4>
+              <BarChart rows={stageBreakdown.map((r) => ({ label: r.band, value: r.averageReactionTimeMs }))} />
+
+              <h4 className="vizSubhead">By colour</h4>
+              <BarChart rows={colorBreakdown.map((r) => ({ label: r.color, value: r.averageReactionTimeMs }))} />
+            </div>
+
             <div className="eyeSection">
               <h3>Where your eyes went 👀</h3>
               <p className="eyeIntro">
-                While you played, the camera tracked your gaze. This is a
+                While you played, the camera tracked your gaze. This is an
                 attention-density map of where you looked — yellow shows where your
-                eyes concentrated most, fading to dark where they rarely went.
+                eyes concentrated most, fading to deep blue where they rarely went.
               </p>
               <canvas ref={heatmapRef} className="heatmap" width={760} height={428} />
-              <div className="eyeStats">
+              <div className="eyeStats eyeStatsWide">
                 <div>
                   <span title="How much of the time your face stayed pointed at the screen.">Focus</span>
                   <strong>{focusScore === null ? "--" : `${focusScore}%`}</strong>
+                </div>
+                <div>
+                  <span title="How still you kept your head. 100 = rock steady.">Steadiness</span>
+                  <strong>{headSteadiness === null ? "--" : `${headSteadiness}%`}</strong>
                 </div>
                 <div>
                   <span title="How widely your eyes swept across the screen.">Gaze roam</span>
                   <strong>{gazeRoam === null ? "--" : `${gazeRoam}%`}</strong>
                 </div>
                 <div>
-                  <span>Gaze points</span>
-                  <strong>{gazePoints.length}</strong>
+                  <span title="How busy your eyes were overall.">Eye busyness</span>
+                  <strong>{gazeTravel === null ? "--" : gazeTravel}</strong>
                 </div>
               </div>
+              {paceShift !== null && (
+                <p className="paceLine">
+                  {paceShift < -15
+                    ? `🔥 You sped up as the game went on — ${Math.abs(paceShift)}ms faster in the second half!`
+                    : paceShift > 15
+                    ? `🧘 You eased off a little near the end — ${paceShift}ms slower in the second half.`
+                    : `⚖️ Rock steady — your pace barely changed from start to finish.`}
+                </p>
+              )}
             </div>
 
             <div className="ctaCard">
@@ -928,6 +1238,32 @@ export default function App() {
               <h3>By size</h3>
               <div className="tableLike">
                 {sizeBreakdown.map((row) => (
+                  <div className="tableRow" key={row.band}>
+                    <strong>{row.band}</strong>
+                    <span>shown {row.shown}</span>
+                    <span>hits {row.hits}</span>
+                    <span>misses {row.misses}</span>
+                    <span>avg {formatMs(row.averageReactionTimeMs)}</span>
+                  </div>
+                ))}
+              </div>
+
+              <h3>By position</h3>
+              <div className="tableLike">
+                {positionBreakdown.map((row) => (
+                  <div className="tableRow" key={row.band}>
+                    <strong>{row.band}</strong>
+                    <span>shown {row.shown}</span>
+                    <span>hits {row.hits}</span>
+                    <span>misses {row.misses}</span>
+                    <span>avg {formatMs(row.averageReactionTimeMs)}</span>
+                  </div>
+                ))}
+              </div>
+
+              <h3>By game stage</h3>
+              <div className="tableLike">
+                {stageBreakdown.map((row) => (
                   <div className="tableRow" key={row.band}>
                     <strong>{row.band}</strong>
                     <span>shown {row.shown}</span>

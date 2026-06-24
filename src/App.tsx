@@ -1368,7 +1368,7 @@ export default function App() {
               <input
                 value={participantId}
                 onChange={(event) => setParticipantId(event.target.value)}
-                placeholder="Example: P001"
+                placeholder="Example: John Smith"
               />
             </label>
 

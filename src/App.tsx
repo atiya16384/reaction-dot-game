@@ -84,10 +84,10 @@ function createTrial(id: number, width: number, height: number): Trial {
   // progress goes 0 (first trial) -> 1 (last trial)
   const progress = TRIAL_COUNT > 1 ? (id - 1) / (TRIAL_COUNT - 1) : 0;
 
-  // Device-aware scaling: narrow play areas (phones) need bigger dots so
-  // a fingertip can hit them as comfortably as a mouse can on a laptop.
-  // Tuned around: 1.0 at desktop width (>=900px), up to ~1.45 on a 380px phone.
-  const sizeScale = Math.max(1, Math.min(1.6, 900 / Math.max(width, 320)));
+  // Device-aware scaling: narrow play areas (phones) need slightly bigger dots
+  // so a fingertip can hit them, but not so big they fill the screen.
+  // ~1.0 at desktop width (>=900px), up to ~1.2 on a small phone.
+  const sizeScale = Math.max(1, Math.min(1.25, 760 / Math.max(width, 320)));
 
   const baseSize = (START_DOT_SIZE + (END_DOT_SIZE - START_DOT_SIZE) * progress) * sizeScale;
   const size = Math.max(
@@ -1139,51 +1139,44 @@ export default function App() {
   }
 
   return (
-    <main className="appShell">
+    <main className={`appShell appShell-${phase}`}>
       <aside className="sidePanel">
         <div className="brandLockup">
           <img src={ndAxonLogo} alt="ND Axon" className="brandLogo" />
           <div className="gameTag">Reaction Challenge</div>
         </div>
-        <p className="muted">
-          Tap the dots as fast as you can! ⚡ They get smaller and quicker as you go —
-          how sharp are your reflexes?
-        </p>
 
-        <div className="statGrid">
-          <div className="statCard">
-            <span>Progress</span>
-            <strong>{completedTrials.length}/{TRIAL_COUNT}</strong>
-          </div>
-          <div className="statCard">
-            <span>Average RT</span>
-            <strong>{formatMs(averageReactionTime)}</strong>
-          </div>
-          <div className="statCard">
-            <span>Missed</span>
-            <strong>{completedTrials.length - clickedTrials.length}</strong>
-          </div>
-          <div className="statCard">
-            <span>Streak</span>
-            <strong>{currentStreak}</strong>
-          </div>
-        </div>
+        {phase === "playing" && (
+          <>
+            <div className="statGrid">
+              <div className="statCard">
+                <span>Progress</span>
+                <strong>{completedTrials.length}/{TRIAL_COUNT}</strong>
+              </div>
+              <div className="statCard">
+                <span>Average RT</span>
+                <strong>{formatMs(averageReactionTime)}</strong>
+              </div>
+              <div className="statCard">
+                <span>Hits</span>
+                <strong>{clickedTrials.length}</strong>
+              </div>
+              <div className="statCard">
+                <span>Streak</span>
+                <strong>{currentStreak}</strong>
+              </div>
+            </div>
+          </>
+        )}
+
+        {phase !== "playing" && (
+          <p className="muted">
+            Tap the dots as fast as you can! ⚡ They get smaller and quicker as you go —
+            how sharp are your reflexes?
+          </p>
+        )}
 
         <p className="cameraStatus">{cameraStatus}</p>
-
-        {phase === "ready" && (
-          <button className="primaryButton" onClick={startGame} disabled={!cameraEnabled}>
-            Start game
-          </button>
-        )}
-
-        {phase === "playing" && currentTrial && (
-          <div className="liveTrial">
-            <span>Current trial</span>
-            <strong>#{currentTrial.id}</strong>
-            <small>{currentTrial.color}, {currentTrial.size}px, {currentTrial.durationMs}ms</small>
-          </div>
-        )}
       </aside>
 
       <section className={`stage stage-${phase}`} ref={gameAreaRef}>
@@ -1253,9 +1246,16 @@ export default function App() {
         )}
 
         {phase === "ready" && (
-          <div className="overlayCard">
-            <h2>Ready</h2>
-            <p>Keep your face visible in the camera preview. Press Start game.</p>
+          <div className="overlayCard readyCard">
+            <span className="readyEmoji">📷✨</span>
+            <h2>You're all set!</h2>
+            <p>
+              Keep your face in view of the camera. When you're ready, tap the dots
+              as fast as you can.
+            </p>
+            <button className="primaryButton bigButton" onClick={startGame} disabled={!cameraEnabled}>
+              Start game
+            </button>
           </div>
         )}
 

@@ -262,6 +262,28 @@ h3 {
   gap: 14px;
 }
 
+.readyCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+}
+
+.readyEmoji {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.bigButton {
+  width: 100%;
+  max-width: 360px;
+  padding: 16px 28px;
+  font-size: 17px;
+  text-align: center;
+  justify-content: center;
+}
+
 .consentLogo {
   width: 200px;
   max-width: 60%;
@@ -725,10 +747,36 @@ h3 {
     grid-template-columns: 1fr;
   }
 
+  /* One clean screen at a time: hide the sidebar on consent, ready, and results.
+     Only show it during play (as a slim top bar). */
+  .appShell-consent .sidePanel,
+  .appShell-ready .sidePanel,
+  .appShell-results .sidePanel {
+    display: none;
+  }
+
   .sidePanel {
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    padding: 18px 16px;
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .appShell-playing .brandLogo {
+    max-width: 130px;
+  }
+
+  .appShell-playing .statGrid {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+  }
+
+  .appShell-playing .statCard {
+    padding: 8px 6px;
+  }
+
+  .appShell-playing .statCard strong {
+    font-size: 16px;
   }
 
   /* On phones the stage flows in the page and grows with its content,
@@ -749,6 +797,7 @@ h3 {
     max-height: none;
     padding: 20px;
     border-radius: 22px;
+    margin: 0 auto;
   }
 
   /* During play and ready, the stage needs real height for dots to appear in. */

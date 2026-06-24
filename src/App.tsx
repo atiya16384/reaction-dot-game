@@ -1364,7 +1364,7 @@ export default function App() {
             </p>
 
             <label className="fieldLabel">
-              Participant ID
+              Full Name
               <input
                 value={participantId}
                 onChange={(event) => setParticipantId(event.target.value)}

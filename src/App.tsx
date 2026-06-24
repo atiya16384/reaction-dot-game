@@ -26,6 +26,7 @@ type Trial = {
 
 type EyeSample = {
   timestamp: number;
+  tMs: number; // ms since game start, for time-series charts
   trialId: number | null;
   faceDetected: boolean;
   leftIrisX: number | null;
@@ -36,6 +37,9 @@ type EyeSample = {
   gazeY: number | null;
   headX: number | null;
   headY: number | null;
+  blinkLeft: number | null; // 0 (open) .. 1 (closed)
+  blinkRight: number | null;
+  isBlink: boolean; // either eye closed past threshold
 };
 
 type ConsentRecord = {
@@ -57,10 +61,10 @@ const COLOR_NAMES = Object.keys(DOT_COLORS) as DotColor[];
 const TRIAL_COUNT = 24;
 // Difficulty ramps over the course of the game: dots start large/slow and end
 // small/fast. These are the size/duration bounds at the EASY (start) and HARD (end) ends.
-const START_DOT_SIZE = 90; // first dots still catchable, but not huge
-const END_DOT_SIZE = 30; // small, tricky final dots
-const START_DURATION_MS = 1100; // noticeably less time even at the start
-const END_DURATION_MS = 480; // blink-and-you-miss-it by the end
+const START_DOT_SIZE = 100; // first dots still catchable, but not huge
+const END_DOT_SIZE = 36; // small, tricky final dots
+const START_DURATION_MS = 1300; // less time even at the start
+const END_DURATION_MS = 620; // very quick, but reachable by the end
 const SIZE_JITTER = 14; // random wobble so it's not perfectly predictable
 const EYE_SAMPLE_INTERVAL_MS = 90;
 
@@ -276,6 +280,48 @@ function BarChart({ rows, unit = "ms" }: { rows: BarRow[]; unit?: string }) {
   );
 }
 
+type BlinkPoint = { tMs: number; openness: number; blink: boolean };
+
+function BlinkChart({ data, events }: { data: BlinkPoint[]; events: { tMs: number }[] }) {
+  const W = 760;
+  const H = 200;
+  const padL = 40;
+  const padR = 16;
+  const padT = 14;
+  const padB = 26;
+  if (data.length < 3) {
+    return <p className="chartEmpty">Not enough face data to chart blinks this round.</p>;
+  }
+  const maxT = Math.max(...data.map((d) => d.tMs), 1);
+  const x = (t: number) => padL + (t / maxT) * (W - padL - padR);
+  const y = (open: number) => padT + (1 - open) * (H - padT - padB);
+  const trace = data.map((d) => `${x(d.tMs)},${y(d.openness)}`).join(" ");
+
+  return (
+    <svg className="lineChart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Eye openness over time with blink events">
+      {/* blink event markers */}
+      {events.map((e, i) => (
+        <line
+          key={i}
+          x1={x(e.tMs)}
+          y1={padT}
+          x2={x(e.tMs)}
+          y2={H - padB}
+          stroke="rgba(238, 83, 165, 0.55)"
+          strokeWidth="2"
+        />
+      ))}
+      {/* openness trace */}
+      <polyline points={trace} fill="none" stroke="#28b6e0" strokeWidth="2.5" strokeLinejoin="round" />
+      {/* axis labels */}
+      <text x={padL} y={H - 8} className="chartLabel" fill="rgba(255,255,255,0.5)">start</text>
+      <text x={W - padR} y={H - 8} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">{Math.round(maxT / 1000)}s</text>
+      <text x={padL - 8} y={padT + 8} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">open</text>
+      <text x={padL - 8} y={H - padB} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">shut</text>
+    </svg>
+  );
+}
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>("consent");
   const [participantId, setParticipantId] = useState("");
@@ -298,6 +344,7 @@ export default function App() {
   const lastEyeSampleTimeRef = useRef(0);
   const eyeSamplesBufferRef = useRef<EyeSample[]>([]);
   const heatmapRef = useRef<HTMLCanvasElement | null>(null);
+  const gameStartRef = useRef<number>(0);
 
   useEffect(() => {
     currentTrialRef.current = currentTrial;
@@ -445,6 +492,83 @@ export default function App() {
     const avg = (arr: number[]) => arr.reduce((s, v) => s + v, 0) / arr.length;
     return Math.round(avg(secondHalf) - avg(firstHalf)); // negative = sped up
   }, [clickedTrials]);
+
+  // ---- ND-Axon-style behavioural-domain metrics (illustrative, never diagnostic) ----
+
+  // Detect discrete blink EVENTS (rising edges where eyes go from open -> closed).
+  const blinkEvents = useMemo(() => {
+    const samples = allEyeSamplesForStats.filter((s) => s.faceDetected);
+    const events: { tMs: number }[] = [];
+    let wasBlinking = false;
+    for (const s of samples) {
+      if (s.isBlink && !wasBlinking) events.push({ tMs: s.tMs });
+      wasBlinking = s.isBlink;
+    }
+    return events;
+  }, [allEyeSamplesForStats]);
+
+  // Blink rate in blinks/min (typical resting human is ~15-20/min).
+  const blinkRate = useMemo(() => {
+    const samples = allEyeSamplesForStats.filter((s) => s.faceDetected);
+    if (samples.length < 2) return null;
+    const spanMs = samples[samples.length - 1].tMs - samples[0].tMs;
+    if (spanMs <= 0) return null;
+    return Math.round((blinkEvents.length / spanMs) * 60000);
+  }, [allEyeSamplesForStats, blinkEvents]);
+
+  // Time series of "eye openness" (1 - max blink score) for the blink chart.
+  const blinkSeries = useMemo(() => {
+    return allEyeSamplesForStats
+      .filter((s) => s.faceDetected && (s.blinkLeft !== null || s.blinkRight !== null))
+      .map((s) => ({
+        tMs: s.tMs,
+        openness: 1 - Math.max(s.blinkLeft ?? 0, s.blinkRight ?? 0),
+        blink: s.isBlink,
+      }));
+  }, [allEyeSamplesForStats]);
+
+  // Gaze entropy: how spread-out / unpredictable the gaze was across a grid.
+  // High entropy = eyes roamed everywhere; low = stayed concentrated. (0..100)
+  const gazeEntropy = useMemo(() => {
+    if (gazePoints.length < 5) return null;
+    const BINS = 6;
+    const counts = new Array(BINS * BINS).fill(0);
+    for (const p of gazePoints) {
+      const bx = Math.min(BINS - 1, Math.max(0, Math.floor(p.x * BINS)));
+      const by = Math.min(BINS - 1, Math.max(0, Math.floor(p.y * BINS)));
+      counts[by * BINS + bx] += 1;
+    }
+    const total = gazePoints.length;
+    let entropy = 0;
+    for (const c of counts) {
+      if (c === 0) continue;
+      const prob = c / total;
+      entropy -= prob * Math.log2(prob);
+    }
+    const maxEntropy = Math.log2(BINS * BINS);
+    return Math.round((entropy / maxEntropy) * 100);
+  }, [gazePoints]);
+
+  // Fixation count: clusters where gaze stayed roughly still for consecutive samples.
+  const fixationCount = useMemo(() => {
+    if (gazePoints.length < 3) return null;
+    let fixations = 0;
+    let inFixation = false;
+    for (let i = 1; i < gazePoints.length; i += 1) {
+      const dx = gazePoints[i].x - gazePoints[i - 1].x;
+      const dy = gazePoints[i].y - gazePoints[i - 1].y;
+      const moved = Math.sqrt(dx * dx + dy * dy);
+      if (moved < 0.03) {
+        if (!inFixation) {
+          fixations += 1;
+          inFixation = true;
+        }
+      } else {
+        inFixation = false;
+      }
+    }
+    return fixations;
+  }, [gazePoints]);
 
   // Paint a gaze-density map (like the research "spatial attention" figures).
   // Tuned to always read as a rich, smooth attention cloud even when the webcam
@@ -681,6 +805,55 @@ export default function App() {
     if (video) video.srcObject = null;
   }
 
+  // Start (or restart) the webcam and the face-tracking loop. Reuses the
+  // already-loaded MediaPipe model on subsequent calls (e.g. Play Again).
+  async function startCameraAndTracking(): Promise<boolean> {
+    try {
+      // Lazy-load the MediaPipe model only the first time.
+      if (!faceLandmarkerRef.current) {
+        setCameraStatus("Loading MediaPipe face model...");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
+        );
+        faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+            delegate: "GPU",
+          },
+          runningMode: "VIDEO",
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          outputFacialTransformationMatrixes: false,
+        });
+      }
+
+      setCameraStatus("Requesting camera permission...");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+        audio: false,
+      });
+
+      const video = videoRef.current;
+      if (!video) return false;
+      video.srcObject = stream;
+      await video.play();
+
+      setCameraEnabled(true);
+      setCameraStatus("Camera and face tracking active");
+      runFaceTrackingLoop();
+      return true;
+    } catch (error) {
+      console.error(error);
+      setCameraStatus("Camera/tracking failed. Use HTTPS, allow camera access, and try again.");
+      return false;
+    }
+  }
+
   async function acceptConsentAndStartCamera() {
     if (!canContinueFromConsent) return;
 
@@ -692,49 +865,9 @@ export default function App() {
       eyeDataConsent,
     };
     setConsentRecord(record);
-    setCameraStatus("Loading MediaPipe face model...");
 
-    try {
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
-      );
-
-      faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        outputFaceBlendshapes: false,
-        outputFacialTransformationMatrixes: false,
-      });
-
-      setCameraStatus("Requesting camera permission...");
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "user",
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-        audio: false,
-      });
-
-      const video = videoRef.current;
-      if (!video) return;
-      video.srcObject = stream;
-      await video.play();
-
-      setCameraEnabled(true);
-      setCameraStatus("Camera and face tracking active");
-      setPhase("ready");
-      runFaceTrackingLoop();
-    } catch (error) {
-      console.error(error);
-      setCameraStatus("Camera/tracking failed. Use HTTPS, allow camera access, and try again.");
-    }
+    const ok = await startCameraAndTracking();
+    if (ok) setPhase("ready");
   }
 
   function runFaceTrackingLoop() {
@@ -750,6 +883,7 @@ export default function App() {
       if (!face) {
         eyeSamplesBufferRef.current.push({
           timestamp: now,
+          tMs: Math.round(now - gameStartRef.current),
           trialId: currentTrialRef.current?.id ?? null,
           faceDetected: false,
           leftIrisX: null,
@@ -760,6 +894,9 @@ export default function App() {
           gazeY: null,
           headX: null,
           headY: null,
+          blinkLeft: null,
+          blinkRight: null,
+          isBlink: false,
         });
       } else {
         const leftIris = averagePoint([
@@ -787,8 +924,19 @@ export default function App() {
               }
             : null;
 
+        // Read blink scores from MediaPipe blendshapes (0 open .. 1 closed).
+        const blendshapes = result.faceBlendshapes?.[0]?.categories ?? [];
+        const blinkLeft =
+          blendshapes.find((c) => c.categoryName === "eyeBlinkLeft")?.score ?? null;
+        const blinkRight =
+          blendshapes.find((c) => c.categoryName === "eyeBlinkRight")?.score ?? null;
+        const isBlink =
+          (blinkLeft !== null && blinkLeft > 0.5) ||
+          (blinkRight !== null && blinkRight > 0.5);
+
         eyeSamplesBufferRef.current.push({
           timestamp: now,
+          tMs: Math.round(now - gameStartRef.current),
           trialId: currentTrialRef.current?.id ?? null,
           faceDetected: true,
           leftIrisX: leftIris?.x ?? null,
@@ -799,6 +947,9 @@ export default function App() {
           gazeY: gaze?.y ?? null,
           headX: noseTip?.x ?? null,
           headY: noseTip?.y ?? null,
+          blinkLeft,
+          blinkRight,
+          isBlink,
         });
       }
     }
@@ -806,10 +957,18 @@ export default function App() {
     rafRef.current = requestAnimationFrame(runFaceTrackingLoop);
   }
 
-  function startGame() {
+  async function startGame() {
     setTrials([]);
     setEyeSamples([]);
     eyeSamplesBufferRef.current = [];
+
+    // If we just came from results, the camera was torn down. Bring it back.
+    if (!cameraEnabled) {
+      const ok = await startCameraAndTracking();
+      if (!ok) return;
+    }
+
+    gameStartRef.current = performance.now();
     setPhase("playing");
     showTrial(1);
   }
@@ -912,6 +1071,10 @@ export default function App() {
         gazeRoamPct: gazeRoam,
         gazeTravel,
         paceShiftMs: paceShift,
+        gazeEntropyPct: gazeEntropy,
+        fixationCount,
+        blinkRatePerMin: blinkRate,
+        totalBlinks: blinkEvents.length,
       },
       trials,
       eyeSamples: allEyeSamples,
@@ -949,6 +1112,7 @@ export default function App() {
       allEyeSamples.map((sample) => ({
         participantId: participantId.trim(),
         timestampMs: Math.round(sample.timestamp),
+        tMs: sample.tMs,
         trialId: sample.trialId ?? "",
         faceDetected: sample.faceDetected,
         leftIrisX: sample.leftIrisX ?? "",
@@ -959,6 +1123,9 @@ export default function App() {
         gazeY: sample.gazeY ?? "",
         headX: sample.headX ?? "",
         headY: sample.headY ?? "",
+        blinkLeft: sample.blinkLeft ?? "",
+        blinkRight: sample.blinkRight ?? "",
+        isBlink: sample.isBlink,
       }))
     );
   }
@@ -1012,9 +1179,13 @@ export default function App() {
       </aside>
 
       <section className="stage" ref={gameAreaRef}>
-        {phase !== "results" && (
-          <video ref={videoRef} className="cameraPreview" playsInline muted />
-        )}
+        <video
+          ref={videoRef}
+          className="cameraPreview"
+          playsInline
+          muted
+          style={{ display: phase === "results" ? "none" : undefined }}
+        />
 
         {phase === "consent" && (
           <div className="overlayCard consentCard">
@@ -1157,30 +1328,97 @@ export default function App() {
               <BarChart rows={colorBreakdown.map((r) => ({ label: r.color, value: r.averageReactionTimeMs }))} />
             </div>
 
-            <div className="eyeSection">
-              <h3>Where your eyes went 👀</h3>
+            <div className="domainsIntro">
+              <h3>Your behavioural breakdown 🧠</h3>
               <p className="eyeIntro">
-                While you played, the camera tracked your gaze. This is an
-                attention-density map of where you looked — yellow shows where your
+                ND Axon studies attention through a few behavioural "domains." Here's a
+                playful, just-for-fun look at yours, built from your camera and gameplay.
+              </p>
+            </div>
+
+            {/* DOMAIN 1 — Attention Organisation */}
+            <div className="eyeSection">
+              <div className="domainHead">
+                <span className="domainTag">Attention Organisation</span>
+                <h4>Where your eyes went 👀</h4>
+              </div>
+              <p className="eyeIntro">
+                An attention-density map of where you looked — yellow shows where your
                 eyes concentrated most, fading to deep blue where they rarely went.
               </p>
               <canvas ref={heatmapRef} className="heatmap" width={760} height={428} />
               <div className="eyeStats eyeStatsWide">
                 <div>
-                  <span title="How much of the time your face stayed pointed at the screen.">Focus</span>
-                  <strong>{focusScore === null ? "--" : `${focusScore}%`}</strong>
+                  <span title="How spread-out your gaze was. Higher = eyes roamed everywhere.">Gaze spread</span>
+                  <strong>{gazeEntropy === null ? "--" : `${gazeEntropy}%`}</strong>
                 </div>
                 <div>
-                  <span title="How still you kept your head. 100 = rock steady.">Steadiness</span>
-                  <strong>{headSteadiness === null ? "--" : `${headSteadiness}%`}</strong>
+                  <span title="Number of moments your gaze settled and held still.">Fixations</span>
+                  <strong>{fixationCount === null ? "--" : fixationCount}</strong>
                 </div>
                 <div>
                   <span title="How widely your eyes swept across the screen.">Gaze roam</span>
                   <strong>{gazeRoam === null ? "--" : `${gazeRoam}%`}</strong>
                 </div>
                 <div>
+                  <span title="How much of the time your face stayed pointed at the screen.">Focus</span>
+                  <strong>{focusScore === null ? "--" : `${focusScore}%`}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* DOMAIN 2 — Arousal Regulation (blinks) */}
+            <div className="eyeSection">
+              <div className="domainHead">
+                <span className="domainTag">Arousal Regulation</span>
+                <h4>Your blinks over time 😌</h4>
+              </div>
+              <p className="eyeIntro">
+                The blue line is how open your eyes were through the game; each pink mark
+                is a blink. Even, rhythmic blinking looks like a steady wave.
+              </p>
+              <BlinkChart data={blinkSeries} events={blinkEvents} />
+              <div className="eyeStats eyeStatsWide">
+                <div>
+                  <span title="How many times you blinked per minute. Resting humans average ~15-20.">Blink rate</span>
+                  <strong>{blinkRate === null ? "--" : `${blinkRate}/min`}</strong>
+                </div>
+                <div>
+                  <span title="Total blinks detected during the game.">Total blinks</span>
+                  <strong>{blinkEvents.length}</strong>
+                </div>
+                <div>
+                  <span title="How still you kept your head. 100 = rock steady.">Steadiness</span>
+                  <strong>{headSteadiness === null ? "--" : `${headSteadiness}%`}</strong>
+                </div>
+                <div>
                   <span title="How busy your eyes were overall.">Eye busyness</span>
                   <strong>{gazeTravel === null ? "--" : gazeTravel}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* DOMAIN 3 — Temporal Stability */}
+            <div className="eyeSection">
+              <div className="domainHead">
+                <span className="domainTag">Temporal Stability</span>
+                <h4>Did you hold steady? ⏱️</h4>
+              </div>
+              <p className="eyeIntro">
+                How consistent you stayed from the start of the game to the end.
+              </p>
+              <div className="eyeStats">
+                <div>
+                  <span title="Lower = your reaction speed barely wavered.">RT consistency (±)</span>
+                  <strong>{formatMs(reactionConsistency)}</strong>
+                </div>
+                <div>
+                  <span title="Difference between your second half and first half.">Pace shift</span>
+                  <strong>{paceShift === null ? "--" : `${paceShift > 0 ? "+" : ""}${paceShift}ms`}</strong>
+                </div>
+                <div>
+                  <span>Accuracy</span>
+                  <strong>{completedTrials.length ? Math.round((clickedTrials.length / completedTrials.length) * 100) : 0}%</strong>
                 </div>
               </div>
               {paceShift !== null && (
@@ -1193,6 +1431,12 @@ export default function App() {
                 </p>
               )}
             </div>
+
+            <p className="domainDisclaimer">
+              These are playful, illustrative readings from an uncalibrated webcam — not a
+              clinical measure of anything. They show the <em>kind</em> of signals ND Axon
+              works with, not a result about you.
+            </p>
 
             <div className="ctaCard">
               <p>

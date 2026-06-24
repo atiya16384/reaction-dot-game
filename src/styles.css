@@ -728,15 +728,49 @@ h3 {
   .sidePanel {
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    padding: 20px;
+    padding: 18px 16px;
   }
 
+  /* On phones the stage flows in the page and grows with its content,
+     instead of being a fixed-height box with an absolutely-centred card. */
   .stage {
-    min-height: 64vh;
+    min-height: auto;
+    display: flex;
+    padding: 14px;
+  }
+
+  /* Cards stop being absolutely-centred; they sit in normal flow and the
+     page scrolls naturally. This fixes the cramped consent screen. */
+  .overlayCard {
+    position: static;
+    transform: none;
+    inset: auto;
+    width: 100%;
+    max-height: none;
+    padding: 20px;
+    border-radius: 22px;
+  }
+
+  /* During play and ready, the stage needs real height for dots to appear in. */
+  .stage-playing,
+  .stage-ready {
+    min-height: 80vh;
+    display: block;
   }
 
   .cameraPreview {
-    width: 118px;
+    width: 96px;
+    right: 12px;
+    bottom: 12px;
+  }
+
+  .consentLogo {
+    width: 160px;
+    max-width: 70%;
+  }
+
+  .overlayCard h2 {
+    font-size: 22px;
   }
 
   .statGrid,
@@ -745,9 +779,29 @@ h3 {
     grid-template-columns: 1fr 1fr;
   }
 
+  .resultBadge h2 {
+    font-size: 24px;
+  }
+
+  .perfHeadline {
+    font-size: 15px;
+  }
+
+  .ctaButtons {
+    flex-direction: column;
+  }
+
+  .ctaButton {
+    justify-content: center;
+  }
+
   .barRow {
-    grid-template-columns: 76px 1fr 54px;
+    grid-template-columns: 70px 1fr 50px;
     gap: 8px;
+  }
+
+  .barLabel {
+    font-size: 12px;
   }
 
   .tableRow,

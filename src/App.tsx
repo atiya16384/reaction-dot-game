@@ -1186,7 +1186,7 @@ export default function App() {
         )}
       </aside>
 
-      <section className="stage" ref={gameAreaRef}>
+      <section className={`stage stage-${phase}`} ref={gameAreaRef}>
         <video
           ref={videoRef}
           className="cameraPreview"

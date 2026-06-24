@@ -330,6 +330,69 @@ function BlinkChart({ data, events }: { data: BlinkPoint[]; events: { tMs: numbe
   );
 }
 
+// Histogram of reaction times — shows the *shape* of the distribution.
+// A tight cluster = consistent; a long right tail = occasional lapses.
+function HistogramChart({ values }: { values: number[] }) {
+  const W = 760;
+  const H = 220;
+  const padL = 40;
+  const padR = 16;
+  const padT = 16;
+  const padB = 34;
+  if (values.length < 4) {
+    return <p className="chartEmpty">Not enough hits to chart the spread this round.</p>;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const BIN_COUNT = Math.min(10, Math.max(5, Math.round(Math.sqrt(values.length))));
+  const binWidth = Math.max(1, (max - min) / BIN_COUNT);
+  const bins = new Array(BIN_COUNT).fill(0);
+  for (const v of values) {
+    const idx = Math.min(BIN_COUNT - 1, Math.floor((v - min) / binWidth));
+    bins[idx] += 1;
+  }
+  const maxCount = Math.max(...bins);
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const barGap = 4;
+  const barW = plotW / BIN_COUNT - barGap;
+
+  return (
+    <svg className="lineChart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Reaction time distribution">
+      {bins.map((count, i) => {
+        const h = maxCount > 0 ? (count / maxCount) * plotH : 0;
+        const x = padL + i * (plotW / BIN_COUNT);
+        const binStart = Math.round(min + i * binWidth);
+        return (
+          <g key={i}>
+            <rect
+              x={x}
+              y={padT + (plotH - h)}
+              width={barW}
+              height={h}
+              rx="3"
+              fill="url(#histGrad)"
+            />
+            {i % 2 === 0 && (
+              <text x={x + barW / 2} y={H - 16} className="chartLabel" textAnchor="middle" fill="rgba(255,255,255,0.45)">
+                {binStart}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      <defs>
+        <linearGradient id="histGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#28b6e0" />
+          <stop offset="100%" stopColor="#0e4867" />
+        </linearGradient>
+      </defs>
+      <text x={padL} y={H - 4} className="chartLabel" fill="rgba(255,255,255,0.5)">faster</text>
+      <text x={W - padR} y={H - 4} className="chartLabel" textAnchor="end" fill="rgba(255,255,255,0.5)">slower (ms)</text>
+    </svg>
+  );
+}
+
 export default function App() {
   const [phase, setPhase] = useState<Phase>("consent");
   const [participantId, setParticipantId] = useState("");
@@ -338,6 +401,9 @@ export default function App() {
   const [eyeDataConsent, setEyeDataConsent] = useState(false);
   const [cameraStatus, setCameraStatus] = useState("Camera not started");
   const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [isLoadingCamera, setIsLoadingCamera] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [missFlash, setMissFlash] = useState(false);
   const [currentTrial, setCurrentTrial] = useState<Trial | null>(null);
   const [trials, setTrials] = useState<Trial[]>([]);
   const [eyeSamples, setEyeSamples] = useState<EyeSample[]>([]);
@@ -353,6 +419,7 @@ export default function App() {
   const eyeSamplesBufferRef = useRef<EyeSample[]>([]);
   const heatmapRef = useRef<HTMLCanvasElement | null>(null);
   const gameStartRef = useRef<number>(0);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   useEffect(() => {
     currentTrialRef.current = currentTrial;
@@ -803,6 +870,50 @@ export default function App() {
     return `You were sharpest on ${parts.join(" ")} dots`;
   }, [colorBreakdown, sizeBreakdown]);
 
+  // Flat list of reaction times (hits only), in trial order, for the histogram.
+  const reactionValues = useMemo(
+    () =>
+      clickedTrials
+        .slice()
+        .sort((a, b) => a.id - b.id)
+        .map((t) => t.reactionTimeMs as number),
+    [clickedTrials]
+  );
+
+  // Vigilance decrement: average RT in each third of the game (early/mid/late).
+  const vigilanceThirds = useMemo(() => {
+    const third = Math.ceil(TRIAL_COUNT / 3);
+    return [
+      { label: "First third", lo: 1, hi: third },
+      { label: "Middle third", lo: third + 1, hi: third * 2 },
+      { label: "Last third", lo: third * 2 + 1, hi: TRIAL_COUNT },
+    ].map(({ label, lo, hi }) => {
+      const rts = clickedTrials
+        .filter((t) => t.id >= lo && t.id <= hi)
+        .map((t) => t.reactionTimeMs as number);
+      return { label, value: rts.length ? average(rts) : null };
+    });
+  }, [clickedTrials]);
+
+  // Post-error slowing: do you slow down on the dot right AFTER a miss,
+  // compared with dots that follow a hit? A classic cognitive-control effect.
+  const postErrorSlowing = useMemo(() => {
+    const ordered = completedTrials.slice().sort((a, b) => a.id - b.id);
+    const afterHit: number[] = [];
+    const afterMiss: number[] = [];
+    for (let i = 1; i < ordered.length; i += 1) {
+      const prev = ordered[i - 1];
+      const curr = ordered[i];
+      if (curr.reactionTimeMs === null) continue; // current must be a hit to time it
+      if (prev.reactionTimeMs === null) afterMiss.push(curr.reactionTimeMs);
+      else afterHit.push(curr.reactionTimeMs);
+    }
+    const avgHit = afterHit.length ? average(afterHit) : null;
+    const avgMiss = afterMiss.length ? average(afterMiss) : null;
+    const delta = avgHit !== null && avgMiss !== null ? avgMiss - avgHit : null;
+    return { avgAfterHit: avgHit, avgAfterMiss: avgMiss, deltaMs: delta };
+  }, [completedTrials]);
+
   const canContinueFromConsent =
     participantId.trim().length > 0 && cameraConsent && reactionDataConsent && eyeDataConsent;
 
@@ -863,7 +974,7 @@ export default function App() {
   }
 
   async function acceptConsentAndStartCamera() {
-    if (!canContinueFromConsent) return;
+    if (!canContinueFromConsent || isLoadingCamera) return;
 
     const record: ConsentRecord = {
       consentedAt: new Date().toISOString(),
@@ -874,7 +985,9 @@ export default function App() {
     };
     setConsentRecord(record);
 
+    setIsLoadingCamera(true);
     const ok = await startCameraAndTracking();
+    setIsLoadingCamera(false);
     if (ok) setPhase("ready");
   }
 
@@ -965,6 +1078,39 @@ export default function App() {
     rafRef.current = requestAnimationFrame(runFaceTrackingLoop);
   }
 
+  // Small haptic buzz on supported devices (mostly Android Chrome).
+  function buzz(ms: number) {
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      try {
+        navigator.vibrate(ms);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Keep the screen awake during play so phones don't dim/sleep mid-game.
+  async function acquireWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLockRef.current = await (navigator as Navigator & {
+          wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> };
+        }).wakeLock.request("screen");
+      }
+    } catch {
+      /* wake lock not critical; ignore failures */
+    }
+  }
+
+  function releaseWakeLock() {
+    try {
+      wakeLockRef.current?.release();
+    } catch {
+      /* ignore */
+    }
+    wakeLockRef.current = null;
+  }
+
   async function startGame() {
     setTrials([]);
     setEyeSamples([]);
@@ -976,8 +1122,19 @@ export default function App() {
       if (!ok) return;
     }
 
-    gameStartRef.current = performance.now();
+    await acquireWakeLock();
     setPhase("playing");
+
+    // 3-2-1 countdown so players aren't caught off-guard by the first dot.
+    setCurrentTrial(null);
+    for (let n = 3; n >= 1; n -= 1) {
+      setCountdown(n);
+      buzz(15);
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+    }
+    setCountdown(null);
+
+    gameStartRef.current = performance.now();
     showTrial(1);
   }
 
@@ -1001,6 +1158,7 @@ export default function App() {
       stopCamera();
       setCameraEnabled(false);
       setCameraStatus("Camera off — thanks!");
+      releaseWakeLock();
       setPhase("results");
       return;
     }
@@ -1015,6 +1173,8 @@ export default function App() {
     missTimerRef.current = window.setTimeout(() => {
       setTrials((previous) => [...previous, { ...trial, missed: true }]);
       setCurrentTrial(null);
+      setMissFlash(true);
+      window.setTimeout(() => setMissFlash(false), 220);
       window.setTimeout(() => showTrial(id + 1), randomInt(350, 750));
     }, trial.durationMs);
   }
@@ -1024,6 +1184,8 @@ export default function App() {
     if (!currentTrial) return;
 
     if (missTimerRef.current) window.clearTimeout(missTimerRef.current);
+
+    buzz(12); // satisfying tap feedback
 
     const clickedAt = performance.now();
     const completedTrial: Trial = {
@@ -1083,6 +1245,8 @@ export default function App() {
         fixationCount,
         blinkRatePerMin: blinkRate,
         totalBlinks: blinkEvents.length,
+        vigilanceThirds,
+        postErrorSlowing,
       },
       trials,
       eyeSamples: allEyeSamples,
@@ -1238,9 +1402,9 @@ export default function App() {
             <button
               className="primaryButton"
               onClick={acceptConsentAndStartCamera}
-              disabled={!canContinueFromConsent}
+              disabled={!canContinueFromConsent || isLoadingCamera}
             >
-              Give permission and continue
+              {isLoadingCamera ? "Setting up camera… ⏳" : "Give permission and continue"}
             </button>
           </div>
         )}
@@ -1273,6 +1437,15 @@ export default function App() {
             }}
           />
         )}
+
+        {phase === "playing" && countdown !== null && (
+          <div className="countdownOverlay" aria-live="assertive">
+            <span className="countdownNumber" key={countdown}>{countdown}</span>
+            <p>Get ready…</p>
+          </div>
+        )}
+
+        {phase === "playing" && missFlash && <div className="missFlash" aria-hidden="true" />}
 
         {phase === "results" && (
           <div className="overlayCard resultsCard">
@@ -1314,6 +1487,38 @@ export default function App() {
                 amber means slower. Watch how you held up as the dots got smaller and quicker.
               </p>
               <ReactionLineChart data={reactionSeries} />
+            </div>
+
+            <div className="vizSection">
+              <h3>The shape of your speed 📊</h3>
+              <p className="eyeIntro">
+                How your reaction times were spread out. A tall, narrow peak means you
+                were very consistent; a long tail to the right means a few slower
+                "lapses" crept in.
+              </p>
+              <HistogramChart values={reactionValues} />
+
+              <h4 className="vizSubhead">Did you tire? (average speed by game stage)</h4>
+              <BarChart rows={vigilanceThirds} />
+
+              {postErrorSlowing.deltaMs !== null && (
+                <>
+                  <h4 className="vizSubhead">After a miss</h4>
+                  <p className="eyeIntro">
+                    {postErrorSlowing.deltaMs > 20
+                      ? `🧠 Classic "post-error slowing" — after missing a dot you took about ${postErrorSlowing.deltaMs}ms longer on the next one, a sign your brain hit the brakes to refocus.`
+                      : postErrorSlowing.deltaMs < -20
+                      ? `⚡ Interesting — you actually sped up by about ${Math.abs(postErrorSlowing.deltaMs)}ms right after a miss, charging ahead rather than slowing to recover.`
+                      : `⚖️ A miss barely changed your next reaction — you stayed even-keeled either way.`}
+                  </p>
+                  <BarChart
+                    rows={[
+                      { label: "after a hit", value: postErrorSlowing.avgAfterHit },
+                      { label: "after a miss", value: postErrorSlowing.avgAfterMiss },
+                    ]}
+                  />
+                </>
+              )}
             </div>
 
             <div className="vizSection">

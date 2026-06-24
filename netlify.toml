@@ -1,0 +1,17 @@
+# Netlify build configuration for the ND Axon Reaction Challenge game.
+# Putting this in the repo means Netlify doesn't need any UI configuration —
+# it'll just work on every push.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Vite 7 + React 19 want a modern Node. 20 LTS is a safe choice.
+  NODE_VERSION = "20"
+
+# Single-page app fallback so deep links don't 404.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

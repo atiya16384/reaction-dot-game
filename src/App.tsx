@@ -84,13 +84,21 @@ function createTrial(id: number, width: number, height: number): Trial {
   // progress goes 0 (first trial) -> 1 (last trial)
   const progress = TRIAL_COUNT > 1 ? (id - 1) / (TRIAL_COUNT - 1) : 0;
 
-  const baseSize = START_DOT_SIZE + (END_DOT_SIZE - START_DOT_SIZE) * progress;
+  // Device-aware scaling: narrow play areas (phones) need bigger dots so
+  // a fingertip can hit them as comfortably as a mouse can on a laptop.
+  // Tuned around: 1.0 at desktop width (>=900px), up to ~1.45 on a 380px phone.
+  const sizeScale = Math.max(1, Math.min(1.6, 900 / Math.max(width, 320)));
+
+  const baseSize = (START_DOT_SIZE + (END_DOT_SIZE - START_DOT_SIZE) * progress) * sizeScale;
   const size = Math.max(
-    18,
+    24,
     Math.round(baseSize + randomBetween(-SIZE_JITTER, SIZE_JITTER))
   );
+  // On smaller screens, also give a tiny bit more time, since tapping
+  // accurately with a finger is slower than clicking with a mouse.
+  const durationScale = Math.max(1, Math.min(1.25, 800 / Math.max(width, 320)));
   const durationMs = Math.round(
-    START_DURATION_MS + (END_DURATION_MS - START_DURATION_MS) * progress
+    (START_DURATION_MS + (END_DURATION_MS - START_DURATION_MS) * progress) * durationScale
   );
   const margin = size + 18;
 
